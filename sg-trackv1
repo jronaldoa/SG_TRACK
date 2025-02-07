@@ -1,0 +1,212 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <SoftwareSerial.h>
+#include <JQ6500_Serial.h>
+
+// Configurações do LCD
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// Configurações do módulo MP3
+SoftwareSerial mySerial(8, 9); // Pinos RX e TX
+JQ6500_Serial mp3(mySerial);
+
+unsigned long ultimaRequisicao = 0; // Último envio de requisição
+const unsigned long intervaloRequisicao = 5000; // 5 segundos para requisições
+
+String status = "0", card = "0", VM = "0", VAC = "0", VMC = "20", VMF = "100";
+String novoCard = "0";
+String estadoChuvaAnterior = "0";
+String estadoVACAnterior = "0";
+String ultimoVM = "0";
+String ultimoVMF = "100";
+int rotinas = 0;
+int passdisplay = 0;
+int toca1 = 0;
+
+const int pinoChuva = 2; // Pino digital para leitura do sensor de chuva
+int chuva = 0; // Estado do sensor de chuva
+
+void setup() {
+  // Comunicação Serial
+  Serial.begin(9600);
+  Serial1.begin(9600);
+  Serial.println("ARDUINO RESETOU");
+
+  // Inicializa LCD
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(4, 0);
+  lcd.print("SGTRACK");
+  lcd.setCursor(3, 1);
+  lcd.print("TELEMETRIA");
+
+  // Inicializa MP3
+  mySerial.begin(9600);
+  mp3.reset();
+  delay(2000);
+  mp3.setVolume(20);
+
+  // Configura pino do sensor de chuva como entrada
+  pinMode(pinoChuva, INPUT);
+}
+
+void loop() {
+  unsigned long tempoAtual = millis();
+
+  // Envia requisição ao rastreador
+  if (tempoAtual - ultimaRequisicao >= intervaloRequisicao) {
+    Serial1.print("#STATUS\n");
+    Serial.println("STATUS ENVIADO");
+    ultimaRequisicao = tempoAtual;
+  }
+
+  // Atualiza valor do sensor de chuva
+  chuva = digitalRead(pinoChuva);
+
+  // Verifica dados do rastreador
+  if (Serial1.available() > 0) {
+    String dadosRastreador = Serial1.readStringUntil('\n');
+    Serial.println("Dados recebidos: " + dadosRastreador);
+
+    // Atualiza variáveis
+    String novoStatus = obterDado(dadosRastreador, 11);
+    String possivelNovoCard = obterDado(dadosRastreador, 13); // Para verificar alteração depois
+    String novaVM = obterDado(dadosRastreador, 7);
+    String novaVAC = obterDado(dadosRastreador, 23);
+    VMC = obterDado(dadosRastreador, 51);
+
+    // Inicializa card na primeira execução
+    if (card == "0") {
+      card = possivelNovoCard; // Primeiro valor de card
+      novoCard = card; // Alinha com o valor inicial
+      Serial.println("Primeiro valor de card registrado: " + card);
+    }
+
+    // Atualiza `novoCard` apenas se for diferente do atual
+    if (possivelNovoCard != card) {
+      novoCard = possivelNovoCard;
+      Serial.println("Novo card detectado: " + novoCard);
+    }
+
+    // Atualiza outros dados rastreador
+    status = novoStatus;
+    VM = novaVM;
+    VAC = novaVAC;
+
+    // Controle de status
+    if (status == "0") {
+      atualizarDisplay("    SGTRACK", "   TELEMETRIA");
+      rotinas = 0; // Reseta rotinas
+      passdisplay = 0;
+      card = novoCard;
+    } else if (status == "1" && rotinas == 0) {
+      atualizarDisplay("     PASSE", "    O CARTAO");
+      if (toca1 == 0) {
+        mp3.playFileByIndexNumber(1); // índice
+        Serial.println("Tocando arquivo 1.");
+        delay(2000);
+        toca1 = 1;
+      }
+
+      // Verifica alteração de card
+      if (card != novoCard) {
+        card = novoCard;
+        atualizarDisplay("   MOTORISTA!", "   BOA VIAGEM");
+        mp3.playFileByIndexNumber(2); // Testar índice 1
+        Serial.println("Tocando arquivo 2.");
+        delay(2000);
+        delay(5000);
+        rotinas = 1;
+        passdisplay = 0;
+        toca1 = 0;
+      }
+    }
+  }
+
+  // Executa as demais rotinas após alteração do card
+  if (rotinas == 1) {
+    processarRotinas();
+  }
+}
+
+void processarRotinas() {
+  // Processa chuva
+  if (String(chuva) != estadoChuvaAnterior) {
+    if (chuva == 1) {
+      VMF = String((VMF.toInt() * 80) / 100);
+      alertaVelocidade(4, "ALERTA", "PISTA MOLHADA");
+      delay(2000);
+    } else {
+      VMF = "100"; // Restaura VMF ao padrão
+    }
+    estadoChuvaAnterior = String(chuva); // Atualiza o estado anterior
+  }
+
+  // Processa VAC
+  if (VAC != estadoVACAnterior) {
+    if (VAC.toInt() != 0) {
+      VMF = VMC;
+      alertaVelocidade(5, "    AREA DE", "    CONTROLE");
+      delay(2000);
+    } else {
+      VMF = "100"; // Restaura VMF ao padrão
+    }
+    estadoVACAnterior = VAC; // Atualiza o estado anterior
+  }
+
+  // Processa VM maior que VMF
+  if (VM.toInt() > VMF.toInt()) {
+    alertaVelocidade(3, "    ALERTA DE", "   VELOCIDADE");
+    delay(2000);
+  } else {
+    // Atualiza apenas os valores de VM e VMF no LCD
+    if (VM != ultimoVM || VMF != ultimoVMF || passdisplay != 1) {
+      atualizarDisplay("VELOCATUAL:" + VM + "KM", "VELOCMAX:" + VMF + "KM");
+      ultimoVM = VM;
+      ultimoVMF = VMF;
+      passdisplay = 1;
+    }
+  }
+}
+
+// Função para exibir alertas com pisca
+void alertaVelocidade(int numAudio, String linha1, String linha2) {
+  tocarAudio(numAudio);
+  for (int i = 0; i < 2; i++) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(linha1);
+    lcd.setCursor(0, 1);
+    lcd.print(linha2);
+    delay(2000); // 2 segundos ligado
+    lcd.clear();
+    delay(2000); // 2 segundos apagado
+  }
+}
+
+// Função para atualizar o display
+void atualizarDisplay(String linha1, String linha2) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(linha1);
+  lcd.setCursor(0, 1);
+  lcd.print(linha2);
+}
+
+// Função para tocar áudio no módulo MP3
+void tocarAudio(int numAudio) {
+  mp3.playFileByIndexNumber(numAudio);
+  Serial.println("Tocando áudio: " + String(numAudio));
+}
+
+// Função para obter um dado específico pelo índice
+String obterDado(String dados, int indice) {
+  int contador = 0;
+  String valor = "";
+  for (char caractere : dados) {
+    if (caractere == ';') contador++;
+    else if (contador == indice - 1) valor += caractere;
+    if (contador >= indice) break;
+  }
+  return valor;
+}
